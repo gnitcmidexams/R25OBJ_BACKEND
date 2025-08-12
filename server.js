@@ -22,7 +22,6 @@ function shuffleArray(array) {
     return array;
 }
 
-// Combined upload and generate endpoint
 app.post('/api/generate', upload.single('excelFile'), async (req, res) => {
     try {
         const { paperType } = req.body;
@@ -31,69 +30,55 @@ app.post('/api/generate', upload.single('excelFile'), async (req, res) => {
             return res.status(400).json({ error: 'No Excel file uploaded' });
         }
 
-        // Parse the Excel file from buffer
         const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
         const jsonData = XLSX.utils.sheet_to_json(worksheet);
 
-        console.log('Raw JSON data from Excel:', jsonData); // Debugging
-
-        // Find the correct 'Question' column key (with potential whitespace)
         const questionKey = Object.keys(jsonData[0]).find(key => key.trim() === 'Question');
         if (!questionKey) {
             return res.status(400).json({ error: 'No "Question" column found in the Excel file' });
         }
 
-        // Process the data into questionBank
+        // Process questions and assign types based on question format
         const questionBank = jsonData.map(row => {
-            const questionText = row[questionKey] ? row[questionKey].trim() : '';
-            let type;
+            let questionText = row[questionKey] ? row[questionKey].toString().trim() : '';
+            let type = 'fill-in-the-blank';
 
-            // Split the question into lines to check for options
-            const lines = questionText.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
-
-            // Check for fill-in-the-blank (blanks with 3 or more underscores)
-            if (/_{3,}/.test(questionText)) {
-                type = 'fill-in-the-blank';
-            }
-            // Check for objective questions (options like A., B., a), b), etc.)
-            else if (lines.length > 1 && /^[A-Da-d][\.\)]\s+/.test(lines[1])) {
-                type = 'objective';
-            }
-            // Default to objective if unclear
-            else {
-                type = 'objective';
+            // Check if the question contains options (indicating multiple-choice)
+            const normalizedQuestion = questionText.replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
+            const lines = normalizedQuestion.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+            const hasOptions = lines.slice(1).some(line => /^[A-D][\.\)]\s+/.test(line));
+            if (hasOptions) {
+                type = 'multiple-choice';
             }
 
             return {
-                subjectCode: row['Subject Code'],
-                subject: row['Subject'],
-                branch: row['Branch'],
-                regulation: row['Regulation'],
-                year: row['Year'],
-                semester: row['Sem'],
-                month: row['Month'],
-                unit: row['Unit'],
-                question: questionText, // Options are still embedded in the question string
+                subjectCode: row['Subject Code'] || '',
+                subject: row['Subject'] || '',
+                branch: row['Branch'] || '',
+                regulation: row['Regulation'] || '',
+                year: row['Year'] || 0,
+                semester: row['Sem'] || 0,
+                month: row['Month'] || '',
+                unit: parseInt(row['Unit']) || 0,
+                question: questionText,
                 imageUrl: row['Image Url'] || null,
                 type: type
             };
-        });
-
-        console.log('Processed questionBank:', questionBank); // Debugging
+        }).filter(q => q.subjectCode && q.question && q.unit > 0); // Filter out invalid rows
 
         if (questionBank.length === 0) {
-            return res.status(400).json({ error: 'No questions found in the Excel file' });
+            return res.status(400).json({ error: 'No valid questions found in the Excel file' });
         }
 
-        // Filter questions by type and unit
-        const objectiveByUnit = {
-            1: questionBank.filter(q => q.unit === 1 && q.type === 'objective'),
-            2: questionBank.filter(q => q.unit === 2 && q.type === 'objective'),
-            3: questionBank.filter(q => q.unit === 3 && q.type === 'objective'),
-            4: questionBank.filter(q => q.unit === 4 && q.type === 'objective'),
-            5: questionBank.filter(q => q.unit === 5 && q.type === 'objective')
+        // Organize questions by unit and type
+        const multipleChoiceByUnit = {
+            1: questionBank.filter(q => q.unit === 1 && q.type === 'multiple-choice'),
+            2: questionBank.filter(q => q.unit === 2 && q.type === 'multiple-choice'),
+            3: questionBank.filter(q => q.unit === 3 && q.type === 'multiple-choice'),
+            4: questionBank.filter(q => q.unit === 4 && q.type === 'multiple-choice'),
+            5: questionBank.filter(q => q.unit === 5 && q.type === 'multiple-choice')
         };
         const fillInTheBlankByUnit = {
             1: questionBank.filter(q => q.unit === 1 && q.type === 'fill-in-the-blank'),
@@ -103,58 +88,86 @@ app.post('/api/generate', upload.single('excelFile'), async (req, res) => {
             5: questionBank.filter(q => q.unit === 5 && q.type === 'fill-in-the-blank')
         };
 
-        console.log('Objective Questions by Unit:', objectiveByUnit); // Debugging
-        console.log('Fill-in-the-Blank Questions by Unit:', fillInTheBlankByUnit); // Debugging
+        console.log('Multiple Choice Questions by Unit:', {
+            Unit1: multipleChoiceByUnit[1].length,
+            Unit2: multipleChoiceByUnit[2].length,
+            Unit3: multipleChoiceByUnit[3].length,
+            Unit4: multipleChoiceByUnit[4].length,
+            Unit5: multipleChoiceByUnit[5].length
+        });
+        console.log('Fill-in-the-Blank Questions by Unit:', {
+            Unit1: fillInTheBlankByUnit[1].length,
+            Unit2: fillInTheBlankByUnit[2].length,
+            Unit3: fillInTheBlankByUnit[3].length,
+            Unit4: fillInTheBlankByUnit[4].length,
+            Unit5: fillInTheBlankByUnit[5].length
+        });
 
-        // Select questions based on paper type
         let selectedQuestions = [];
         if (paperType === 'mid1') {
-            // Mid 1: Objective (2 from Unit 1, 2 from Unit 2, 1 from Unit 3)
-            if (objectiveByUnit[1].length < 2 || objectiveByUnit[2].length < 2 || objectiveByUnit[3].length < 1) {
+            // Mid 1: 4 MCQs + 4 FIBs from Unit 1, 4 MCQs + 4 FIBs from Unit 2, 2 MCQs + 2 FIBs from Unit 3 (first half)
+            if (multipleChoiceByUnit[1].length < 4 || multipleChoiceByUnit[2].length < 4 || multipleChoiceByUnit[3].length < 10) {
                 return res.status(400).json({ 
-                    error: 'Insufficient objective questions for Mid 1: Need 2 from Unit 1, 2 from Unit 2, 1 from Unit 3' 
+                    error: `Insufficient multiple-choice questions for Mid 1: Need 4 from Unit 1 (found ${multipleChoiceByUnit[1].length}), 4 from Unit 2 (found ${multipleChoiceByUnit[2].length}), 10 from Unit 3 (found ${multipleChoiceByUnit[3].length})` 
                 });
             }
-            if (fillInTheBlankByUnit[1].length < 2 || fillInTheBlankByUnit[2].length < 2 || fillInTheBlankByUnit[3].length < 1) {
+            if (fillInTheBlankByUnit[1].length < 4 || fillInTheBlankByUnit[2].length < 4 || fillInTheBlankByUnit[3].length < 10) {
                 return res.status(400).json({ 
-                    error: 'Insufficient fill-in-the-blank questions for Mid 1: Need 2 from Unit 1, 2 from Unit 2, 1 from Unit 3' 
+                    error: `Insufficient fill-in-the-blank questions for Mid 1: Need 4 from Unit 1 (found ${fillInTheBlankByUnit[1].length}), 4 from Unit 2 (found ${fillInTheBlankByUnit[2].length}), 10 from Unit 3 (found ${fillInTheBlankByUnit[3].length})` 
                 });
             }
 
             selectedQuestions = [
-                ...shuffleArray([...objectiveByUnit[1]]).slice(0, 2), // Q1, Q2
-                ...shuffleArray([...objectiveByUnit[2]]).slice(0, 2), // Q3, Q4
-                ...shuffleArray([...objectiveByUnit[3]]).slice(0, 1), // Q5
-                ...shuffleArray([...fillInTheBlankByUnit[1]]).slice(0, 2), // Q6, Q7
-                ...shuffleArray([...fillInTheBlankByUnit[2]]).slice(0, 2), // Q8, Q9
-                ...shuffleArray([...fillInTheBlankByUnit[3]]).slice(0, 1)  // Q10
+                ...shuffleArray([...multipleChoiceByUnit[1]]).slice(0, 4), // 4 MCQs from Unit 1
+                ...shuffleArray([...multipleChoiceByUnit[2]]).slice(0, 4), // 4 MCQs from Unit 2
+                ...shuffleArray([...multipleChoiceByUnit[3].slice(0, 10)]).slice(0, 2), // 2 MCQs from Unit 3 (first 10)
+                ...shuffleArray([...fillInTheBlankByUnit[1]]).slice(0, 4), // 4 FIBs from Unit 1
+                ...shuffleArray([...fillInTheBlankByUnit[2]]).slice(0, 4), // 4 FIBs from Unit 2
+                ...shuffleArray([...fillInTheBlankByUnit[3].slice(0, 10)]).slice(0, 2) // 2 FIBs from Unit 3 (first 10)
             ];
+
+            console.log('Mid 1 Selection Breakdown:', {
+                'Q1-Q4 (MC, Unit 1)': selectedQuestions.slice(0, 4),
+                'Q5-Q8 (MC, Unit 2)': selectedQuestions.slice(4, 8),
+                'Q9-Q10 (MC, Unit 3)': selectedQuestions.slice(8, 10),
+                'Q11-Q14 (FIB, Unit 1)': selectedQuestions.slice(10, 14),
+                'Q15-Q18 (FIB, Unit 2)': selectedQuestions.slice(14, 18),
+                'Q19-Q20 (FIB, Unit 3)': selectedQuestions.slice(18, 20)
+            });
         } else if (paperType === 'mid2') {
-            // Mid 2: Objective (1 from Unit 3, 2 from Unit 4, 2 from Unit 5)
-            if (objectiveByUnit[3].length < 1 || objectiveByUnit[4].length < 2 || objectiveByUnit[5].length < 2) {
+            // Mid 2: 4 MCQs + 4 FIBs from Unit 4, 4 MCQs + 4 FIBs from Unit 5, 2 MCQs + 2 FIBs from Unit 3 (second half)
+            if (multipleChoiceByUnit[3].length < 20 || multipleChoiceByUnit[4].length < 4 || multipleChoiceByUnit[5].length < 4) {
                 return res.status(400).json({ 
-                    error: 'Insufficient objective questions for Mid 2: Need 1 from Unit 3, 2 from Unit 4, 2 from Unit 5' 
+                    error: `Insufficient multiple-choice questions for Mid 2: Need 10 from Unit 3 (found ${multipleChoiceByUnit[3].length}), 4 from Unit 4 (found ${multipleChoiceByUnit[4].length}), 4 from Unit 5 (found ${multipleChoiceByUnit[5].length})` 
                 });
             }
-            if (fillInTheBlankByUnit[3].length < 1 || fillInTheBlankByUnit[4].length < 2 || fillInTheBlankByUnit[5].length < 2) {
+            if (fillInTheBlankByUnit[3].length < 20 || fillInTheBlankByUnit[4].length < 4 || fillInTheBlankByUnit[5].length < 4) {
                 return res.status(400).json({ 
-                    error: 'Insufficient fill-in-the-blank questions for Mid 2: Need 1 from Unit 3, 2 from Unit 4, 2 from Unit 5' 
+                    error: `Insufficient fill-in-the-blank questions for Mid 2: Need 10 from Unit 3 (found ${fillInTheBlankByUnit[3].length}), 4 from Unit 4 (found ${fillInTheBlankByUnit[4].length}), 4 from Unit 5 (found ${fillInTheBlankByUnit[5].length})` 
                 });
             }
 
             selectedQuestions = [
-                ...shuffleArray([...objectiveByUnit[3]]).slice(0, 1), // Q1
-                ...shuffleArray([...objectiveByUnit[4]]).slice(0, 2), // Q2, Q3
-                ...shuffleArray([...objectiveByUnit[5]]).slice(0, 2), // Q4, Q5
-                ...shuffleArray([...fillInTheBlankByUnit[3]]).slice(0, 1), // Q6
-                ...shuffleArray([...fillInTheBlankByUnit[4]]).slice(0, 2), // Q7, Q8
-                ...shuffleArray([...fillInTheBlankByUnit[5]]).slice(0, 2)  // Q9, Q10
+                ...shuffleArray([...multipleChoiceByUnit[3].slice(10, 20)]).slice(0, 2), // 2 MCQs from Unit 3 (second 10)
+                ...shuffleArray([...multipleChoiceByUnit[4]]).slice(0, 4), // 4 MCQs from Unit 4
+                ...shuffleArray([...multipleChoiceByUnit[5]]).slice(0, 4), // 4 MCQs from Unit 5
+                ...shuffleArray([...fillInTheBlankByUnit[3].slice(10, 20)]).slice(0, 2), // 2 FIBs from Unit 3 (second 10)
+                ...shuffleArray([...fillInTheBlankByUnit[4]]).slice(0, 4), // 4 FIBs from Unit 4
+                ...shuffleArray([...fillInTheBlankByUnit[5]]).slice(0, 4) // 4 FIBs from Unit 5
             ];
+
+            console.log('Mid 2 Selection Breakdown:', {
+                'Q1-Q2 (MC, Unit 3)': selectedQuestions.slice(0, 2),
+                'Q3-Q6 (MC, Unit 4)': selectedQuestions.slice(2, 6),
+                'Q7-Q10 (MC, Unit 5)': selectedQuestions.slice(6, 10),
+                'Q11-Q12 (FIB, Unit 3)': selectedQuestions.slice(10, 12),
+                'Q13-Q16 (FIB, Unit 4)': selectedQuestions.slice(12, 16),
+                'Q17-Q20 (FIB, Unit 5)': selectedQuestions.slice(16, 20)
+            });
         } else {
             return res.status(400).json({ error: 'Invalid paperType. Use "mid1" or "mid2".' });
         }
 
-        // Extract paper details from the first question
         const paperDetails = {
             subjectCode: selectedQuestions[0].subjectCode,
             subject: selectedQuestions[0].subject,
@@ -165,17 +178,16 @@ app.post('/api/generate', upload.single('excelFile'), async (req, res) => {
             month: selectedQuestions[0].month
         };
 
-        // Prepare response
         const response = {
             paperDetails,
             questions: selectedQuestions.map(q => ({
                 question: q.question,
                 unit: q.unit,
-                imageUrl: q.imageUrl
+                imageUrl: q.imageUrl,
+                type: q.type
             }))
         };
 
-        console.log('Selected Questions:', response.questions); // Debugging
         res.status(200).json(response);
     } catch (error) {
         console.error('Error generating questions:', error);
@@ -183,7 +195,6 @@ app.post('/api/generate', upload.single('excelFile'), async (req, res) => {
     }
 });
 
-// Image proxy endpoint
 app.get('/api/image-proxy-base64', async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'No image URL provided' });
@@ -205,7 +216,6 @@ app.get('/api/image-proxy-base64', async (req, res) => {
     }
 });
 
-// Start server
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);
 });
