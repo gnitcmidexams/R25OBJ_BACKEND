@@ -2,7 +2,6 @@ const express = require('express');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const cors = require('cors');
-
 const app = express();
 const port = 3000;
 
@@ -10,231 +9,238 @@ const port = 3000;
 app.use(cors());
 app.use(express.json());
 
-// Multer setup → memory storage
+// Multer setup for file uploads
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Fisher-Yates shuffle
+// Helper function to shuffle an array (Fisher-Yates shuffle)
 function shuffleArray(array) {
-  const copy = [...array];
-  for (let i = copy.length - 1; i > 0; i--) {
+  for (let i = array.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
+    [array[i], array[j]] = [array[j], array[i]];
   }
-  return copy;
+  return array;
 }
 
 app.post('/api/generate', upload.single('excelFile'), async (req, res) => {
   try {
     const { paperType } = req.body;
-
     if (!req.file) {
       return res.status(400).json({ error: 'No Excel file uploaded' });
-    }
-
-    if (!['mid1', 'mid2'].includes(paperType)) {
-      return res.status(400).json({ error: 'paperType must be "mid1" or "mid2"' });
     }
 
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
 
-    // Find column indices
-    const headers = jsonData[0].map(h => (h || '').trim().toLowerCase());
-    const col = {
-      subjectCode: headers.indexOf('subject code'),
-      subject: headers.indexOf('subject'),
-      branch: headers.indexOf('branch'),
-      regulation: headers.indexOf('regulation'),
-      year: headers.indexOf('year'),
-      sem: headers.indexOf('sem'),
-      month: headers.indexOf('month'),
-      unit: headers.indexOf('unit'),
-      question: headers.indexOf('question'),
-      type: headers.indexOf('type'),
-      // imageUrl: headers.indexOf('image url') || -1,
-    };
+    const questionKey = Object.keys(jsonData[0] || {}).find(key => key.trim() === 'Question');
+    const typeKey = Object.keys(jsonData[0] || {}).find(key => key.trim() === 'Type');
 
-    if (col.question === -1 || col.type === -1 || col.unit === -1) {
-      return res.status(400).json({
-        error: 'Excel must contain columns: Question, Type, Unit (case insensitive)'
-      });
+    if (!questionKey || !typeKey) {
+      return res.status(400).json({ error: 'Excel file missing "Question" or "Type" column' });
     }
 
-    const questionBank = [];
-
-    for (let i = 1; i < jsonData.length; i++) {
-      const row = jsonData[i];
-      const qText = (row[col.question] || '').toString().trim().replace(/\s+/g, ' ');
-      const typeRaw = (row[col.type] || '').toString().trim().toLowerCase();
-      const unitRaw = row[col.unit];
-
-      if (!qText) continue;
+    // Process questions
+    const questionBank = jsonData.map(row => {
+      let questionText = (row[questionKey] || '').toString().trim();
+      questionText = questionText.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ');
 
       let type = null;
-      if (typeRaw === 'm') type = 'mcq';
-      else if (typeRaw === 'f' || typeRaw === 'fib') type = 'fib';
-      else continue; // skip unknown types
+      const t = (row[typeKey] || '').toString().trim().toLowerCase();
+      if (t === 'm') type = 'multiple-choice';
+      else if (t === 'f' || t === 'o') type = 'fill-in-the-blank';
+      else return null;
 
-      let unit = Number(unitRaw);
-      if (isNaN(unit) || unit < 1 || unit > 5) continue;
+      let question = questionText;
+      let optionA = null, optionB = null, optionC = null, optionD = null;
 
-      let question = qText;
-      let options = null;
-
-      if (type === 'mcq') {
-        // Try to split question + options
-        const parts = qText.split(/\s*[A-Da-d][\.\)]\s*/);
-        if (parts.length >= 5) {
-          question = parts[0].trim();
-          options = parts.slice(1, 5).map(t => t.trim());
+      if (type === 'multiple-choice') {
+        const optionRegex = /([A-Da-d])[\.\)]\s*(.*?)(?=\s*[A-Da-d][\.\)]\s*|$)/g;
+        let match;
+        let options = [];
+        while ((match = optionRegex.exec(questionText)) !== null) {
+          options.push({ letter: match[1].toUpperCase(), text: match[2].trim() });
+        }
+        if (options.length >= 4) {
+          const firstMatch = questionText.match(/([A-Da-d])[\.\)]\s*/);
+          if (firstMatch) {
+            question = questionText.substring(0, firstMatch.index).trim();
+            optionA = options.find(o => o.letter === 'A')?.text || null;
+            optionB = options.find(o => o.letter === 'B')?.text || null;
+            optionC = options.find(o => o.letter === 'C')?.text || null;
+            optionD = options.find(o => o.letter === 'D')?.text || null;
+          }
         } else {
-          // fallback — keep whole text as question, no options split
+          return null;
         }
       }
 
-      questionBank.push({
-        subjectCode: row[col.subjectCode] || '',
-        subject: row[col.subject] || '',
-        branch: row[col.branch] || '',
-        regulation: row[col.regulation] || '',
-        year: row[col.year] || '',
-        semester: row[col.sem] || '',
-        month: row[col.month] || '',
+      const unit = parseInt(row['Unit']) || 0;
+      if (unit < 1) return null;
+
+      return {
+        subjectCode: row['Subject Code'] || '',
+        subject: row['Subject'] || '',
+        branch: row['Branch'] || '',
+        regulation: row['Regulation'] || '',
+        year: row['Year'] || '',
+        semester: row['Sem'] || '',
+        month: row['Month'] || '',
         unit,
         question,
+        imageUrl: row['Image Url'] || null,
         type,
-        options, // array of 4 strings or null
-        // imageUrl: col.imageUrl >= 0 ? (row[col.imageUrl] || null) : null,
-      });
-    }
+        ...(type === 'multiple-choice' ? { optionA, optionB, optionC, optionD } : {})
+      };
+    }).filter(q => q && q.question && q.subjectCode);
 
     if (questionBank.length === 0) {
       return res.status(400).json({ error: 'No valid questions found in Excel' });
     }
 
     // Group by unit & type
-    const mcqByUnit = { 1: [], 2: [], 3: [], 4: [], 5: [] };
-    const fibByUnit = { 1: [], 2: [], 3: [], 4: [], 5: [] };
+    const multipleChoiceByUnit = {
+      1: questionBank.filter(q => q.unit === 1 && q.type === 'multiple-choice'),
+      2: questionBank.filter(q => q.unit === 2 && q.type === 'multiple-choice'),
+      3: questionBank.filter(q => q.unit === 3 && q.type === 'multiple-choice'),
+      4: questionBank.filter(q => q.unit === 4 && q.type === 'multiple-choice'),
+      5: questionBank.filter(q => q.unit === 5 && q.type === 'multiple-choice'),
+    };
 
-    questionBank.forEach(q => {
-      if (q.type === 'mcq') {
-        if (mcqByUnit[q.unit]) mcqByUnit[q.unit].push(q);
-      } else if (q.type === 'fib') {
-        if (fibByUnit[q.unit]) fibByUnit[q.unit].push(q);
-      }
+    const fillInTheBlankByUnit = {
+      1: questionBank.filter(q => q.unit === 1 && q.type === 'fill-in-the-blank'),
+      2: questionBank.filter(q => q.unit === 2 && q.type === 'fill-in-the-blank'),
+      3: questionBank.filter(q => q.unit === 3 && q.type === 'fill-in-the-blank'),
+      4: questionBank.filter(q => q.unit === 4 && q.type === 'fill-in-the-blank'),
+      5: questionBank.filter(q => q.unit === 5 && q.type === 'fill-in-the-blank'),
+    };
+
+    console.log('Available MCQs:', {
+      u1: multipleChoiceByUnit[1].length,
+      u2: multipleChoiceByUnit[2].length,
+      u3: multipleChoiceByUnit[3].length,
+      u4: multipleChoiceByUnit[4].length,
+      u5: multipleChoiceByUnit[5].length
     });
 
-    // Debug counts
-    console.log('MCQ counts per unit:', Object.fromEntries(
-      Object.entries(mcqByUnit).map(([u, arr]) => [u, arr.length])
-    ));
-    console.log('FIB counts per unit:', Object.fromEntries(
-      Object.entries(fibByUnit).map(([u, arr]) => [u, arr.length])
-    ));
+    console.log('Available FIBs:', {
+      u1: fillInTheBlankByUnit[1].length,
+      u2: fillInTheBlankByUnit[2].length,
+      u3: fillInTheBlankByUnit[3].length,
+      u4: fillInTheBlankByUnit[4].length,
+      u5: fillInTheBlankByUnit[5].length
+    });
 
-    let selected = [];
+    let selectedQuestions = [];
 
     if (paperType === 'mid1') {
-      // Mid 1 ───────────────────────────────
-      const need = {
-        mcq: [4, 4, 2],
-        fib: [4, 4, 2]
-      };
+      // Mid 1 pattern: prefer unit 1 → 2 → fallback to unit 3
+      const mc1 = shuffleArray([...multipleChoiceByUnit[1]]).slice(0, 4);
+      const mc2 = shuffleArray([...multipleChoiceByUnit[2]]).slice(0, 4);
+      const mc3 = shuffleArray([...multipleChoiceByUnit[3]]).slice(0, 2);
 
-      for (let u = 1; u <= 3; u++) {
-        const mcqs = shuffleArray(mcqByUnit[u]).slice(0, need.mcq[u - 1]);
-        const fibs = shuffleArray(fibByUnit[u]).slice(0, need.fib[u - 1]);
+      const fib1 = shuffleArray([...fillInTheBlankByUnit[1]]).slice(0, 4);
+      const fib2 = shuffleArray([...fillInTheBlankByUnit[2]]).slice(0, 4);
+      const fib3 = shuffleArray([...fillInTheBlankByUnit[3]]).slice(0, 2);
 
-        if (mcqs.length < need.mcq[u - 1] || fibs.length < need.fib[u - 1]) {
-          return res.status(400).json({
-            error: `Not enough questions in Unit ${u} for Mid-1\n` +
-                   `MCQ needed: ${need.mcq[u - 1]}, have: ${mcqByUnit[u].length}\n` +
-                   `FIB needed: ${need.fib[u - 1]}, have: ${fibByUnit[u].length}`
-          });
-        }
+      selectedQuestions = [...mc1, ...mc2, ...mc3, ...fib1, ...fib2, ...fib3];
 
-        selected.push(...mcqs, ...fibs);
+      // If total < 16 → take extra from unit 3 to reach closer to 20
+      if (selectedQuestions.length < 16) {
+        const remaining = 20 - selectedQuestions.length;
+        const extraMC = shuffleArray([...multipleChoiceByUnit[3].filter(q => !mc3.includes(q))]).slice(0, remaining);
+        const extraFIB = shuffleArray([...fillInTheBlankByUnit[3].filter(q => !fib3.includes(q))]).slice(0, remaining);
+        selectedQuestions.push(...extraMC, ...extraFIB);
       }
-    } else {
-      // Mid 2 ───────────────────────────────
-      const need = {
-        mcq: [2, 4, 4], // unit 3,4,5
-        fib: [2, 4, 4]
-      };
 
-      // We take from the "second half" of unit 3 — very rough approximation
-      const unit3McqSecondHalf = shuffleArray(mcqByUnit[3]).slice(-10); // last 10
-      const unit3FibSecondHalf = shuffleArray(fibByUnit[3]).slice(-10);
-
-      const mcqU3 = shuffleArray(unit3McqSecondHalf).slice(0, need.mcq[0]);
-      const fibU3 = shuffleArray(unit3FibSecondHalf).slice(0, need.fib[0]);
-
-      const mcqU4 = shuffleArray(mcqByUnit[4]).slice(0, need.mcq[1]);
-      const mcqU5 = shuffleArray(mcqByUnit[5]).slice(0, need.mcq[2]);
-
-      const fibU4 = shuffleArray(fibByUnit[4]).slice(0, need.fib[1]);
-      const fibU5 = shuffleArray(fibByUnit[5]).slice(0, need.fib[2]);
-
-      if (
-        mcqU3.length < need.mcq[0] ||
-        mcqU4.length < need.mcq[1] ||
-        mcqU5.length < need.mcq[2] ||
-        fibU3.length < need.fib[0] ||
-        fibU4.length < need.fib[1] ||
-        fibU5.length < need.fib[2]
-      ) {
+      if (selectedQuestions.length < 14) {
         return res.status(400).json({
-          error: `Not enough questions for Mid-2\n` +
-                 `Unit 3 MCQ: ${mcqU3.length}/${need.mcq[0]}\n` +
-                 `Unit 4 MCQ: ${mcqU4.length}/${need.mcq[1]}\n` +
-                 `Unit 5 MCQ: ${mcqU5.length}/${need.mcq[2]}\n` +
-                 `Unit 3 FIB: ${fibU3.length}/${need.fib[0]}\n` +
-                 `Unit 4 FIB: ${fibU4.length}/${need.fib[1]}\n` +
-                 `Unit 5 FIB: ${fibU5.length}/${need.fib[2]}`
+          error: `Not enough questions for Mid-1 (got ${selectedQuestions.length}, target ~20)`
         });
       }
+    } 
+    else if (paperType === 'mid2') {
+      // Mid 2 pattern: unit 3 (small part) → unit 4 → unit 5
+      const mc3 = shuffleArray([...multipleChoiceByUnit[3]]).slice(0, 2);
+      const mc4 = shuffleArray([...multipleChoiceByUnit[4]]).slice(0, 4);
+      const mc5 = shuffleArray([...multipleChoiceByUnit[5]]).slice(0, 4);
 
-      selected.push(...mcqU3, ...mcqU4, ...mcqU5, ...fibU3, ...fibU4, ...fibU5);
+      const fib3 = shuffleArray([...fillInTheBlankByUnit[3]]).slice(0, 2);
+      const fib4 = shuffleArray([...fillInTheBlankByUnit[4]]).slice(0, 4);
+      const fib5 = shuffleArray([...fillInTheBlankByUnit[5]]).slice(0, 4);
+
+      selectedQuestions = [...mc3, ...mc4, ...mc5, ...fib3, ...fib4, ...fib5];
+
+      // If short → take extra from unit 5 or 4
+      if (selectedQuestions.length < 16) {
+        const remaining = 20 - selectedQuestions.length;
+        const extraMC = shuffleArray([...multipleChoiceByUnit[5].filter(q => !mc5.includes(q))]).slice(0, remaining);
+        const extraFIB = shuffleArray([...fillInTheBlankByUnit[5].filter(q => !fib5.includes(q))]).slice(0, remaining);
+        selectedQuestions.push(...extraMC, ...extraFIB);
+      }
+
+      if (selectedQuestions.length < 14) {
+        return res.status(400).json({
+          error: `Not enough questions for Mid-2 (got ${selectedQuestions.length}, target ~20)`
+        });
+      }
+    } 
+    else {
+      return res.status(400).json({ error: 'Invalid paperType. Use "mid1" or "mid2".' });
     }
 
-    // Prepare clean response
-    const paperInfo = selected[0]
-      ? {
-          subjectCode: selected[0].subjectCode,
-          subject: selected[0].subject,
-          branch: selected[0].branch,
-          regulation: selected[0].regulation,
-          year: selected[0].year,
-          semester: selected[0].semester,
-          month: selected[0].month
-        }
-      : {};
+    // Paper metadata from first question
+    const paperDetails = selectedQuestions.length > 0 ? {
+      subjectCode: selectedQuestions[0].subjectCode,
+      subject: selectedQuestions[0].subject,
+      branch: selectedQuestions[0].branch,
+      regulation: selectedQuestions[0].regulation,
+      year: selectedQuestions[0].year,
+      semester: selectedQuestions[0].semester,
+      month: selectedQuestions[0].month
+    } : {};
 
-    const questions = selected.map(q => ({
-      question: q.question,
-      unit: q.unit,
-      type: q.type,
-      options: q.options || null,
-      // imageUrl: q.imageUrl || null,
-    }));
+    const response = {
+      paperDetails,
+      questions: selectedQuestions.map(q => ({
+        question: q.question,
+        unit: q.unit,
+        imageUrl: q.imageUrl,
+        type: q.type,
+        ...(q.type === 'multiple-choice' ? {
+          optionA: q.optionA,
+          optionB: q.optionB,
+          optionC: q.optionC,
+          optionD: q.optionD
+        } : {})
+      }))
+    };
 
-    res.json({
-      paperType,
-      paperDetails: paperInfo,
-      totalQuestions: questions.length,
-      questions
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({
-      error: 'Server error while generating paper',
-      detail: err.message
-    });
+    res.status(200).json(response);
+  } catch (error) {
+    console.error('Error generating paper:', error);
+    res.status(500).json({ error: 'Server error generating paper: ' + error.message });
+  }
+});
+
+app.get('/api/image-proxy-base64', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'No image URL provided' });
+  try {
+    const fetch = (await import('node-fetch')).default;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Failed to fetch image');
+    const buffer = await response.buffer();
+    const base64 = buffer.toString('base64');
+    const mimeType = response.headers.get('content-type') || 'image/png';
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+    res.json({ dataUrl });
+  } catch (error) {
+    console.error('Error fetching image:', error);
+    res.status(500).json({ error: 'Failed to fetch image: ' + error.message });
   }
 });
 
 app.listen(port, () => {
-  console.log(`Question paper generator running on http://localhost:${port}`);
+  console.log(`Server running on port ${port}`);
 });
